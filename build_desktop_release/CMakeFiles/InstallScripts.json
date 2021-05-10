@@ -1,0 +1,9 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/elcruzo/Documents/Code/light-sensor-circuit/build_desktop_release/cmake_install.cmake",
+		"/Users/elcruzo/Documents/Code/light-sensor-circuit/build_desktop_release/examples/cmake_install.cmake",
+		"/Users/elcruzo/Documents/Code/light-sensor-circuit/build_desktop_release/tests/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

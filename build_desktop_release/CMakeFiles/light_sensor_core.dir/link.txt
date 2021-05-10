@@ -1,0 +1,2 @@
+/usr/bin/ar qc lib/liblight_sensor_core.a CMakeFiles/light_sensor_core.dir/src/core/light_sensor.cpp.o CMakeFiles/light_sensor_core.dir/src/power/power_manager.cpp.o CMakeFiles/light_sensor_core.dir/src/storage/data_logger.cpp.o CMakeFiles/light_sensor_core.dir/src/signal/signal_processor.cpp.o CMakeFiles/light_sensor_core.dir/src/config/config_manager.cpp.o CMakeFiles/light_sensor_core.dir/src/utils/logger.cpp.o CMakeFiles/light_sensor_core.dir/src/utils/timer.cpp.o
+/usr/bin/ranlib lib/liblight_sensor_core.a
