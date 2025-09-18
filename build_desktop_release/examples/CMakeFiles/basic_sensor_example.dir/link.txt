@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/basic_sensor_example.dir/basic_sensor_example.cpp.o -o basic_sensor_example  ../lib/liblight_sensor_core.a -lm
