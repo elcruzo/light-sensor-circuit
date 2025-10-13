@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <chrono>
 #include <functional>
 
 namespace LightSensor {
@@ -10,9 +9,9 @@ namespace LightSensor {
  * @brief Power management modes
  */
 enum class PowerMode {
-    ACTIVE,         // Full power, all systems running
-    LOW_POWER,      // Reduced power, essential systems only
-    SLEEP,          // Sleep mode, wake on interrupt
+    ACTIVE,         // Full power, all systems running (240MHz)
+    LOW_POWER,      // Reduced power, lower CPU frequency (80MHz)
+    SLEEP,          // Light sleep, wake on interrupt
     DEEP_SLEEP      // Deep sleep, minimal power consumption
 };
 
@@ -67,7 +66,7 @@ enum class WakeSource {
 using PowerEventCallback = std::function<void(PowerMode, WakeSource)>;
 
 /**
- * @brief Power management class for low-power operation
+ * @brief ESP32 Power management class for low-power operation
  */
 class PowerManager {
 public:
@@ -93,11 +92,17 @@ public:
     PowerMode getCurrentMode() const;
     
     /**
-     * @brief Enter sleep mode for specified duration
+     * @brief Enter light sleep mode for specified duration
      * @param duration_ms Sleep duration in milliseconds
      * @param wake_source Wake-up source
      */
     void sleep(uint32_t duration_ms, WakeSource wake_source = WakeSource::TIMER);
+    
+    /**
+     * @brief Enter deep sleep mode (CPU resets on wake)
+     * @param duration_ms Sleep duration in milliseconds
+     */
+    void deepSleep(uint32_t duration_ms);
     
     /**
      * @brief Wake up from sleep
@@ -154,6 +159,11 @@ public:
     void setWakeOnLight(bool enable, float threshold = 0.1f);
     
     /**
+     * @brief Record user activity (resets sleep timer)
+     */
+    void recordActivity();
+    
+    /**
      * @brief Process power management (call in main loop)
      */
     void process();
@@ -164,37 +174,17 @@ private:
     PowerStats stats_;
     PowerEventCallback event_callback_;
     
-    std::chrono::steady_clock::time_point last_activity_time_;
-    std::chrono::steady_clock::time_point sleep_start_time_;
+    uint32_t last_activity_time_ms_;
+    uint32_t sleep_start_time_ms_;
     bool wake_on_light_enabled_;
     float last_light_level_;
     
-    /**
-     * @brief Configure hardware for power mode
-     * @param mode Power mode to configure for
-     */
     void configureHardwareForMode(PowerMode mode);
-    
-    /**
-     * @brief Disable unused peripherals
-     */
+    void setCpuFrequency(uint32_t freq_mhz);
     void disableUnusedPeripherals();
-    
-    /**
-     * @brief Enable essential peripherals
-     */
     void enableEssentialPeripherals();
-    
-    /**
-     * @brief Update power statistics
-     */
     void updatePowerStats();
-    
-    /**
-     * @brief Calculate current consumption estimate
-     * @return Estimated current in milliamps
-     */
     float calculateCurrentConsumption() const;
 };
 
-} // namespace LightSensor
+}  // namespace LightSensor

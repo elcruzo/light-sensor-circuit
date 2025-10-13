@@ -1,19 +1,17 @@
 #include "logger.h"
-#include <iostream>
-#include <iomanip>
-#include <sstream>
-
-#ifdef ARDUINO
 #include <Arduino.h>
-#else
-#include <chrono>
-#endif
+#include <SPIFFS.h>
 
 namespace LightSensor {
 
 Logger& Logger::getInstance() {
     static Logger instance;
     return instance;
+}
+
+Logger::Logger() 
+    : level_(LogLevel::INFO), output_(LogOutput::SERIAL), 
+      file_is_open_(false) {
 }
 
 void Logger::setLevel(LogLevel level) {
@@ -24,114 +22,105 @@ void Logger::setOutput(LogOutput output) {
     output_ = output;
 }
 
-void Logger::log(LogLevel level, const std::string& message) {
+void Logger::log(LogLevel level, const char* message) {
     if (level < level_) {
         return;
     }
     
-    std::string formatted_message = formatMessage(level, message);
+    char formatted_message[256];
+    formatMessage(level, message, formatted_message, sizeof(formatted_message));
     
     switch (output_) {
         case LogOutput::SERIAL:
-            #ifdef ARDUINO
-            Serial.println(formatted_message.c_str());
-            #else
-            std::cout << formatted_message << std::endl;
-            #endif
-            break;
-            
-        case LogOutput::CONSOLE:
-            std::cout << formatted_message << std::endl;
+            Serial.println(formatted_message);
             break;
             
         case LogOutput::FILE:
-            if (file_stream_.is_open()) {
-                file_stream_ << formatted_message << std::endl;
-                file_stream_.flush();
+            if (file_is_open_) {
+                log_file_.println(formatted_message);
+                log_file_.flush();
+            }
+            break;
+            
+        case LogOutput::BOTH:
+            Serial.println(formatted_message);
+            if (file_is_open_) {
+                log_file_.println(formatted_message);
+                log_file_.flush();
             }
             break;
             
         case LogOutput::NONE:
-            // No output
             break;
     }
 }
 
-void Logger::debug(const std::string& message) {
+void Logger::debug(const char* message) {
     log(LogLevel::DEBUG, message);
 }
 
-void Logger::info(const std::string& message) {
+void Logger::info(const char* message) {
     log(LogLevel::INFO, message);
 }
 
-void Logger::warning(const std::string& message) {
+void Logger::warning(const char* message) {
     log(LogLevel::WARNING, message);
 }
 
-void Logger::error(const std::string& message) {
+void Logger::error(const char* message) {
     log(LogLevel::ERROR, message);
 }
 
-void Logger::critical(const std::string& message) {
+void Logger::critical(const char* message) {
     log(LogLevel::CRITICAL, message);
 }
 
-bool Logger::setLogFile(const std::string& filename) {
-    if (file_stream_.is_open()) {
-        file_stream_.close();
+bool Logger::setLogFile(const char* filename) {
+    if (file_is_open_) {
+        log_file_.close();
+        file_is_open_ = false;
     }
     
-    file_stream_.open(filename, std::ios::out | std::ios::app);
-    return file_stream_.is_open();
+    // Initialize SPIFFS if not already done
+    if (!SPIFFS.begin(true)) {
+        return false;
+    }
+    
+    log_file_ = SPIFFS.open(filename, FILE_APPEND);
+    if (!log_file_) {
+        return false;
+    }
+    
+    file_is_open_ = true;
+    strncpy(log_file_path_, filename, sizeof(log_file_path_) - 1);
+    log_file_path_[sizeof(log_file_path_) - 1] = '\0';
+    
+    return true;
 }
 
 void Logger::closeLogFile() {
-    if (file_stream_.is_open()) {
-        file_stream_.close();
+    if (file_is_open_) {
+        log_file_.close();
+        file_is_open_ = false;
     }
 }
 
-std::string Logger::formatMessage(LogLevel level, const std::string& message) const {
-    std::stringstream ss;
+void Logger::formatMessage(LogLevel level, const char* message, char* buffer, size_t buffer_size) const {
+    uint32_t timestamp = millis();
+    const char* level_str = levelToString(level);
     
-    // Add timestamp
-    ss << "[" << getTimestamp() << "] ";
-    
-    // Add level
-    ss << "[" << levelToString(level) << "] ";
-    
-    // Add message
-    ss << message;
-    
-    return ss.str();
+    snprintf(buffer, buffer_size, "[%lu] [%s] %s", timestamp, level_str, message);
 }
 
-std::string Logger::getTimestamp() const {
-    #ifdef ARDUINO
-    return std::to_string(millis());
-    #else
-    auto now = std::chrono::system_clock::now();
-    auto time_t = std::chrono::system_clock::to_time_t(now);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()) % 1000;
-    
-    std::stringstream ss;
-    ss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
-    ss << "." << std::setfill('0') << std::setw(3) << ms.count();
-    return ss.str();
-    #endif
-}
-
-std::string Logger::levelToString(LogLevel level) const {
+const char* Logger::levelToString(LogLevel level) const {
     switch (level) {
-        case LogLevel::DEBUG: return "DEBUG";
-        case LogLevel::INFO: return "INFO";
-        case LogLevel::WARNING: return "WARN";
-        case LogLevel::ERROR: return "ERROR";
+        case LogLevel::DEBUG:    return "DEBUG";
+        case LogLevel::INFO:     return "INFO";
+        case LogLevel::WARNING:  return "WARN";
+        case LogLevel::ERROR:    return "ERROR";
         case LogLevel::CRITICAL: return "CRIT";
-        default: return "UNKNOWN";
+        default:                 return "UNKNOWN";
     }
 }
 
-} // namespace LightSensor
+}  // namespace LightSensor

@@ -1,23 +1,22 @@
 #include "light_sensor.h"
+#include <Arduino.h>
 #include <algorithm>
 #include <cmath>
-#include <chrono>
-#include <thread>
-#include <vector>
-
-#ifdef ARDUINO
-#include <Arduino.h>
-#else
-// Mock Arduino functions for testing
-#define analogRead(pin) (rand() % 1024)
-#define millis() (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())
-#define delay(ms) std::this_thread::sleep_for(std::chrono::milliseconds(ms))
-#endif
 
 namespace LightSensor {
 
+// ESP32 ADC configuration
+static const uint8_t ADC_WIDTH = 12;  // 12-bit ADC
+static const uint16_t ADC_MAX_VALUE = 4095;
+
 ADCLightSensor::ADCLightSensor(const SensorConfig& config)
-    : config_(config), is_sampling_(false), is_initialized_(false) {
+    : config_(config), is_sampling_(false), is_initialized_(false),
+      last_sample_time_ms_(0), was_sampling_before_sleep_(false) {
+    // Initialize filter buffer
+    for (size_t i = 0; i < FILTER_BUFFER_SIZE; ++i) {
+        filter_buffer_[i] = 0.0f;
+    }
+    filter_buffer_index_ = 0;
 }
 
 bool ADCLightSensor::initialize() {
@@ -25,13 +24,26 @@ bool ADCLightSensor::initialize() {
         return true;
     }
     
-    // Initialize ADC pin
-    #ifdef ARDUINO
-    pinMode(config_.adc_pin, INPUT);
-    #endif
-    
     // Validate configuration
     if (config_.adc_resolution == 0 || config_.reference_voltage <= 0.0f) {
+        return false;
+    }
+    
+    // Validate ADC pin is a valid ESP32 ADC pin (GPIO 32-39 for ADC1)
+    if (config_.adc_pin < 32 || config_.adc_pin > 39) {
+        return false;
+    }
+    
+    // Configure ADC
+    analogReadResolution(ADC_WIDTH);
+    analogSetAttenuation(ADC_11db);  // Full range 0-3.3V
+    
+    // Set pin mode
+    pinMode(config_.adc_pin, INPUT);
+    
+    // Test read to verify ADC is working
+    int test_value = analogRead(config_.adc_pin);
+    if (test_value < 0) {
         return false;
     }
     
@@ -40,11 +52,12 @@ bool ADCLightSensor::initialize() {
 }
 
 SensorReading ADCLightSensor::read() {
+    SensorReading reading = {0, 0.0f, 0.0f, 0.0f, false, 0};
+    
     if (!is_initialized_) {
-        return {0, 0.0f, 0.0f, 0.0f, false, 0};
+        return reading;
     }
     
-    SensorReading reading;
     reading.timestamp_ms = millis();
     
     // Perform oversampling for noise reduction
@@ -52,7 +65,7 @@ SensorReading ADCLightSensor::read() {
     for (uint8_t i = 0; i < config_.oversampling; ++i) {
         sum += readRawADC();
         if (i < config_.oversampling - 1) {
-            delay(1); // Small delay between samples
+            delayMicroseconds(100);  // Small delay between samples
         }
     }
     
@@ -75,7 +88,7 @@ void ADCLightSensor::startSampling(DataCallback callback) {
     
     data_callback_ = callback;
     is_sampling_ = true;
-    last_sample_time_ = std::chrono::steady_clock::now();
+    last_sample_time_ms_ = millis();
 }
 
 void ADCLightSensor::stopSampling() {
@@ -87,49 +100,65 @@ void ADCLightSensor::configure(const SensorConfig& config) {
     config_ = config;
     // Re-initialize if already initialized
     if (is_initialized_) {
+        is_initialized_ = false;
         initialize();
     }
 }
 
 void ADCLightSensor::calibrate(float dark_value, float light_value) {
     if (dark_value >= light_value) {
-        return; // Invalid calibration values
+        return;  // Invalid calibration values
     }
     
     // Update calibration parameters
     config_.dark_offset = dark_value;
-    config_.sensitivity = (light_value - dark_value) / 1000.0f; // Assume 1000 lux reference
+    config_.sensitivity = (light_value - dark_value) / 1000.0f;  // Assume 1000 lux reference
     
     // Adjust noise threshold based on signal range
-    config_.noise_threshold = (light_value - dark_value) * 0.01f; // 1% of signal range
+    config_.noise_threshold = (light_value - dark_value) * 0.01f;  // 1% of signal range
 }
 
 void ADCLightSensor::enterLowPower() {
+    was_sampling_before_sleep_ = is_sampling_;
+    
     if (is_sampling_) {
         stopSampling();
     }
     
-    // In a real implementation, this would:
-    // - Disable ADC
-    // - Enter sleep mode
-    // - Configure wake-up sources
+    // Disable ADC to save power
+    adc_power_off();
 }
 
 void ADCLightSensor::wakeUp() {
-    // In a real implementation, this would:
-    // - Re-enable ADC
-    // - Restore previous configuration
-    // - Resume sampling if it was active
+    // Re-enable ADC
+    adc_power_on();
+    
+    // Small delay for ADC to stabilize
+    delay(10);
+    
+    // Resume sampling if it was active before sleep
+    if (was_sampling_before_sleep_ && data_callback_) {
+        is_sampling_ = true;
+        last_sample_time_ms_ = millis();
+    }
+}
+
+void ADCLightSensor::process() {
+    if (!is_sampling_ || !data_callback_) {
+        return;
+    }
+    
+    uint32_t now = millis();
+    if (now - last_sample_time_ms_ >= config_.sample_rate_ms) {
+        SensorReading reading = read();
+        data_callback_(reading);
+        last_sample_time_ms_ = now;
+    }
 }
 
 float ADCLightSensor::readRawADC() {
-    #ifdef ARDUINO
     int raw_value = analogRead(config_.adc_pin);
-    return static_cast<float>(raw_value) / ((1 << config_.adc_resolution) - 1);
-    #else
-    // Mock implementation for testing
-    return static_cast<float>(rand()) / RAND_MAX;
-    #endif
+    return static_cast<float>(raw_value) / ADC_MAX_VALUE;
 }
 
 float ADCLightSensor::adcToVoltage(float raw_value) {
@@ -149,19 +178,15 @@ float ADCLightSensor::voltageToLux(float voltage) {
 }
 
 float ADCLightSensor::applyNoiseFilter(float reading) {
-    // Simple moving average filter for noise reduction
-    static std::vector<float> filter_buffer(5, 0.0f);
-    static size_t buffer_index = 0;
-    
-    filter_buffer[buffer_index] = reading;
-    buffer_index = (buffer_index + 1) % filter_buffer.size();
+    filter_buffer_[filter_buffer_index_] = reading;
+    filter_buffer_index_ = (filter_buffer_index_ + 1) % FILTER_BUFFER_SIZE;
     
     float sum = 0.0f;
-    for (float value : filter_buffer) {
-        sum += value;
+    for (size_t i = 0; i < FILTER_BUFFER_SIZE; ++i) {
+        sum += filter_buffer_[i];
     }
     
-    return sum / filter_buffer.size();
+    return sum / FILTER_BUFFER_SIZE;
 }
 
 uint8_t ADCLightSensor::calculateQuality(const SensorReading& reading) {
@@ -186,4 +211,4 @@ uint8_t ADCLightSensor::calculateQuality(const SensorReading& reading) {
     return static_cast<uint8_t>(std::min(100.0f, std::max(0.0f, quality)));
 }
 
-} // namespace LightSensor
+}  // namespace LightSensor

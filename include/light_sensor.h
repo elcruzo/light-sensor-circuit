@@ -2,8 +2,6 @@
 
 #include <cstdint>
 #include <functional>
-#include <vector>
-#include <chrono>
 
 namespace LightSensor {
 
@@ -24,7 +22,7 @@ struct SensorReading {
  */
 struct SensorConfig {
     // ADC Configuration
-    uint8_t adc_pin;          // ADC pin number
+    uint8_t adc_pin;          // ADC pin number (GPIO 32-39 for ESP32)
     uint16_t adc_resolution;  // ADC resolution (bits)
     float reference_voltage;  // Reference voltage (V)
     
@@ -100,10 +98,15 @@ public:
      * @brief Wake from low power mode
      */
     virtual void wakeUp() = 0;
+    
+    /**
+     * @brief Process sensor (call in main loop for continuous sampling)
+     */
+    virtual void process() = 0;
 };
 
 /**
- * @brief Concrete implementation for ADC-based light sensor
+ * @brief ESP32 ADC-based light sensor implementation
  */
 class ADCLightSensor : public ILightSensor {
 public:
@@ -118,47 +121,27 @@ public:
     void calibrate(float dark_value, float light_value) override;
     void enterLowPower() override;
     void wakeUp() override;
+    void process() override;
     
 private:
+    static const size_t FILTER_BUFFER_SIZE = 5;
+    
     SensorConfig config_;
     bool is_sampling_;
     bool is_initialized_;
+    bool was_sampling_before_sleep_;
     DataCallback data_callback_;
-    std::chrono::steady_clock::time_point last_sample_time_;
+    uint32_t last_sample_time_ms_;
     
-    /**
-     * @brief Read raw ADC value
-     * @return Raw ADC reading (0.0 - 1.0)
-     */
+    // Noise filter buffer (static array instead of std::vector)
+    float filter_buffer_[FILTER_BUFFER_SIZE];
+    size_t filter_buffer_index_;
+    
     float readRawADC();
-    
-    /**
-     * @brief Convert raw ADC value to voltage
-     * @param raw_value Raw ADC value
-     * @return Voltage in volts
-     */
     float adcToVoltage(float raw_value);
-    
-    /**
-     * @brief Convert voltage to lux value
-     * @param voltage Voltage reading
-     * @return Lux value
-     */
     float voltageToLux(float voltage);
-    
-    /**
-     * @brief Apply noise filtering to reading
-     * @param reading Raw reading to filter
-     * @return Filtered reading
-     */
     float applyNoiseFilter(float reading);
-    
-    /**
-     * @brief Calculate signal quality
-     * @param reading Current reading
-     * @return Quality score (0-100)
-     */
     uint8_t calculateQuality(const SensorReading& reading);
 };
 
-} // namespace LightSensor
+}  // namespace LightSensor

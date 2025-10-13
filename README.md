@@ -1,53 +1,90 @@
-# Light Sensor Circuit - Software Implementation
+# ESP32 Light Sensor
 
-A microcontroller-based light sensor data logging system optimized for low-power operation and stable performance under variable light conditions.
+Light sensor library for ESP32. Requires actual hardware.
 
-## Project Overview
+## Hardware
 
-This project implements the software components for a light sensor circuit designed in LTSpice and implemented on PCB using KiCAD. The system is optimized for energy-efficient devices with real-time data collection and analysis capabilities.
+- **ESP32** (ESP32, ESP32-S3, or ESP32-C3)
+- **Light sensor** on GPIO 34 (photodiode, phototransistor, or LDR)
+- **Optional**: Battery voltage divider on GPIO 35
 
-## Features
+## Wiring
 
-- **Low-Power Operation**: Optimized for minimal power consumption
-- **Real-Time Data Logging**: Continuous sensor data collection with buffering
-- **Noise Reduction**: Advanced signal processing for stable readings
-- **Configurable Sampling**: Adjustable sampling rates and thresholds
-- **Data Analysis**: Built-in statistical analysis and trend detection
-- **Power Management**: Sleep modes and wake-up optimization
+```
+Light Sensor:
+    Anode (+)  → 3.3V
+    Cathode (-) → GPIO 34
+    Cathode (-) → 10kΩ resistor → GND
 
-## Hardware Requirements
+Battery Monitor (optional):
+    Battery (+) → 100kΩ → GPIO 35 → 100kΩ → GND
+```
 
-- Microcontroller (Arduino/ESP32/STM32 compatible)
-- Light sensor (photodiode/phototransistor)
-- ADC interface
-- Optional: SD card for data storage
-- Optional: Real-time clock (RTC)
+## Build
 
-## Software Architecture
+```bash
+# Install PlatformIO
+pip install platformio
+
+# Build
+pio run
+
+# Upload config files to SPIFFS
+pio run -t uploadfs
+
+# Upload firmware
+pio run -t upload
+
+# Monitor serial output
+pio device monitor
+```
+
+## Configuration
+
+Edit `data/config.json`:
+
+```json
+{
+  "sensor": {
+    "adc_pin": 34,
+    "sample_rate_ms": 1000,
+    "oversampling": 4
+  }
+}
+```
+
+## Calibration
+
+1. Cover sensor → note reading (dark reference)
+2. Expose to known light level → note reading
+3. Update `data/calibration.json`:
+
+```json
+{
+  "dark_reference": 0.05,
+  "light_reference": 1000.0,
+  "sensitivity": 0.003,
+  "is_valid": true
+}
+```
+
+## Structure
 
 ```
 src/
-├── core/           # Core sensor and data management classes
-├── power/          # Power management and optimization
-├── signal/         # Signal processing and noise reduction
-├── storage/        # Data logging and storage interfaces
-├── config/         # Configuration and calibration management
-└── utils/          # Utility functions and helpers
+├── main.cpp        # Entry point
+├── core/           # Sensor driver
+├── power/          # Power management
+├── storage/        # Data logging (SPIFFS)
+├── signal/         # Filtering
+├── config/         # JSON config
+└── utils/          # Logger, timer
 ```
 
-## Building
+## Boards
 
 ```bash
-mkdir build
-cd build
-cmake ..
-make
+pio run -e esp32dev   # ESP32
+pio run -e esp32-s3   # ESP32-S3
+pio run -e esp32-c3   # ESP32-C3
 ```
-
-## Usage
-
-See `examples/` directory for usage examples and `tests/` for unit tests.
-
-## Hardware Integration
-
-The `hardware/` directory is reserved for hardware design files (KiCAD schematics, LTSpice simulations, PCB layouts).

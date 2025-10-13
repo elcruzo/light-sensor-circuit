@@ -1,40 +1,30 @@
 #include "power_manager.h"
-#include <algorithm>
-#include <chrono>
-#include <thread>
-
-#ifdef ARDUINO
 #include <Arduino.h>
-#include <avr/sleep.h>
-#include <avr/power.h>
-#else
-// Mock functions for testing
-#define millis() (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count())
-#define delay(ms) std::this_thread::sleep_for(std::chrono::milliseconds(ms))
-#endif
+#include <esp_sleep.h>
+#include <esp_wifi.h>
+#include <driver/adc.h>
+#include <algorithm>
 
 namespace LightSensor {
 
 PowerManager::PowerManager(const PowerConfig& config)
     : config_(config), current_mode_(PowerMode::ACTIVE), 
-      wake_on_light_enabled_(false), last_light_level_(0.0f) {
+      wake_on_light_enabled_(false), last_light_level_(0.0f),
+      last_activity_time_ms_(0), sleep_start_time_ms_(0) {
     
     // Initialize power statistics
     stats_ = {0, 0, 0, 0.0f, 0.0f, 0.0f, 100};
-    last_activity_time_ = std::chrono::steady_clock::now();
 }
 
 bool PowerManager::initialize() {
-    // Initialize power management hardware
-    #ifdef ARDUINO
-    // Configure power reduction register
-    PRR = 0;
+    last_activity_time_ms_ = millis();
     
-    // Configure sleep mode
-    set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-    #endif
+    // Check wake reason
+    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    if (wakeup_reason != ESP_SLEEP_WAKEUP_UNDEFINED) {
+        stats_.wake_count++;
+    }
     
-    last_activity_time_ = std::chrono::steady_clock::now();
     return true;
 }
 
@@ -43,16 +33,13 @@ void PowerManager::setPowerMode(PowerMode mode) {
         return;
     }
     
-    PowerMode previous_mode = current_mode_;
     current_mode_ = mode;
-    
     configureHardwareForMode(mode);
     
     if (event_callback_) {
         event_callback_(mode, WakeSource::TIMER);
     }
     
-    // Update statistics
     updatePowerStats();
 }
 
@@ -65,25 +52,36 @@ void PowerManager::sleep(uint32_t duration_ms, WakeSource wake_source) {
         setPowerMode(PowerMode::SLEEP);
     }
     
-    sleep_start_time_ = std::chrono::steady_clock::now();
+    sleep_start_time_ms_ = millis();
     
-    #ifdef ARDUINO
-    // Configure timer for wake-up
+    // Configure wake-up source
     if (wake_source == WakeSource::TIMER) {
-        // Use watchdog timer for wake-up
-        wdt_enable(WDTO_8S); // 8 second timeout
+        esp_sleep_enable_timer_wakeup(duration_ms * 1000ULL);  // Convert to microseconds
     }
     
-    // Enter sleep mode
-    sleep_enable();
-    sleep_cpu();
-    sleep_disable();
-    #else
-    // Mock sleep for testing
-    delay(duration_ms);
-    #endif
+    if (wake_on_light_enabled_ && config_.enable_wake_on_light) {
+        // Configure GPIO wake-up for light sensor interrupt (if using interrupt-capable sensor)
+        // This requires external comparator circuit
+    }
     
+    // Enter light sleep (maintains RAM, faster wake)
+    esp_light_sleep_start();
+    
+    // Execution resumes here after wake-up
     wakeUp(wake_source);
+}
+
+void PowerManager::deepSleep(uint32_t duration_ms) {
+    setPowerMode(PowerMode::DEEP_SLEEP);
+    sleep_start_time_ms_ = millis();
+    
+    // Configure timer wake-up
+    esp_sleep_enable_timer_wakeup(duration_ms * 1000ULL);
+    
+    // Enter deep sleep (RAM lost, slower wake but lowest power)
+    esp_deep_sleep_start();
+    
+    // Execution never reaches here - CPU resets on wake
 }
 
 void PowerManager::wakeUp(WakeSource source) {
@@ -92,7 +90,7 @@ void PowerManager::wakeUp(WakeSource source) {
         stats_.wake_count++;
     }
     
-    last_activity_time_ = std::chrono::steady_clock::now();
+    last_activity_time_ms_ = millis();
     
     if (event_callback_) {
         event_callback_(current_mode_, source);
@@ -100,10 +98,7 @@ void PowerManager::wakeUp(WakeSource source) {
 }
 
 bool PowerManager::shouldEnterLowPower() const {
-    auto now = std::chrono::steady_clock::now();
-    auto time_since_activity = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now - last_activity_time_).count();
-    
+    uint32_t time_since_activity = millis() - last_activity_time_ms_;
     return time_since_activity > config_.sleep_timeout_ms;
 }
 
@@ -112,9 +107,7 @@ void PowerManager::optimizePowerConsumption() {
         if (current_mode_ == PowerMode::ACTIVE) {
             setPowerMode(PowerMode::LOW_POWER);
         } else if (current_mode_ == PowerMode::LOW_POWER) {
-            auto now = std::chrono::steady_clock::now();
-            auto time_since_activity = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - last_activity_time_).count();
+            uint32_t time_since_activity = millis() - last_activity_time_ms_;
             
             if (time_since_activity > config_.deep_sleep_timeout_ms) {
                 setPowerMode(PowerMode::DEEP_SLEEP);
@@ -134,7 +127,7 @@ void PowerManager::setPowerEventCallback(PowerEventCallback callback) {
 void PowerManager::updateBatteryVoltage(float voltage) {
     stats_.battery_voltage = voltage;
     
-    // Calculate battery percentage (assuming 3.0V - 4.2V range)
+    // Calculate battery percentage (assuming 3.0V - 4.2V LiPo range)
     const float min_voltage = 3.0f;
     const float max_voltage = 4.2f;
     
@@ -163,13 +156,16 @@ void PowerManager::setWakeOnLight(bool enable, float threshold) {
     config_.light_threshold = threshold;
 }
 
+void PowerManager::recordActivity() {
+    last_activity_time_ms_ = millis();
+}
+
 void PowerManager::process() {
-    // Update power statistics
     updatePowerStats();
     
     // Check for low battery conditions
     if (isBatteryCritical()) {
-        setPowerMode(PowerMode::DEEP_SLEEP);
+        deepSleep(60000);  // Deep sleep for 1 minute to conserve power
     } else if (isBatteryLow()) {
         setPowerMode(PowerMode::LOW_POWER);
     } else {
@@ -180,62 +176,53 @@ void PowerManager::process() {
 void PowerManager::configureHardwareForMode(PowerMode mode) {
     switch (mode) {
         case PowerMode::ACTIVE:
-            enableEssentialPeripherals();
+            // Full power - enable all peripherals
+            setCpuFrequency(240);  // Full speed
+            adc_power_on();
             break;
             
         case PowerMode::LOW_POWER:
-            disableUnusedPeripherals();
-            #ifdef ARDUINO
-            if (config_.reduce_clock_speed) {
-                // Reduce clock speed (implementation depends on MCU)
-                // This is a placeholder - actual implementation would be MCU-specific
+            // Reduced power - lower CPU frequency
+            setCpuFrequency(80);  // Reduced speed
+            if (config_.disable_unused_peripherals) {
+                disableUnusedPeripherals();
             }
-            #endif
             break;
             
         case PowerMode::SLEEP:
+            // Light sleep preparation
+            setCpuFrequency(80);
             disableUnusedPeripherals();
-            #ifdef ARDUINO
-            set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-            #endif
             break;
             
         case PowerMode::DEEP_SLEEP:
+            // Deep sleep preparation - disable everything possible
             disableUnusedPeripherals();
-            #ifdef ARDUINO
-            set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-            // Disable more peripherals for deep sleep
-            power_all_disable();
-            #endif
+            adc_power_off();
             break;
     }
 }
 
+void PowerManager::setCpuFrequency(uint32_t freq_mhz) {
+    setCpuFrequencyMhz(freq_mhz);
+}
+
 void PowerManager::disableUnusedPeripherals() {
-    #ifdef ARDUINO
     if (config_.disable_unused_peripherals) {
-        // Disable unused peripherals to save power
-        power_spi_disable();
-        power_twi_disable();
-        power_usart0_disable();
-        power_timer1_disable();
-        power_timer2_disable();
+        // Disable WiFi if not needed
+        esp_wifi_stop();
+        
+        // Disable Bluetooth if not needed
+        // btStop();  // Uncomment if using Bluetooth
     }
-    #endif
 }
 
 void PowerManager::enableEssentialPeripherals() {
-    #ifdef ARDUINO
-    // Enable essential peripherals
-    power_adc_enable();
-    power_timer0_enable(); // For millis() function
-    #endif
+    adc_power_on();
 }
 
 void PowerManager::updatePowerStats() {
-    auto now = std::chrono::steady_clock::now();
-    auto current_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()).count();
+    uint32_t current_time_ms = millis();
     
     // Update active/sleep time based on current mode
     if (current_mode_ == PowerMode::ACTIVE || current_mode_ == PowerMode::LOW_POWER) {
@@ -253,19 +240,19 @@ void PowerManager::updatePowerStats() {
 }
 
 float PowerManager::calculateCurrentConsumption() const {
-    // Estimate current consumption based on power mode
+    // ESP32 typical current consumption by mode
     switch (current_mode_) {
         case PowerMode::ACTIVE:
-            return 15.0f; // ~15mA in active mode
+            return 80.0f;   // ~80mA at 240MHz with WiFi off
         case PowerMode::LOW_POWER:
-            return 5.0f;  // ~5mA in low power mode
+            return 20.0f;   // ~20mA at 80MHz
         case PowerMode::SLEEP:
-            return 0.5f;  // ~0.5mA in sleep mode
+            return 0.8f;    // ~0.8mA in light sleep
         case PowerMode::DEEP_SLEEP:
-            return 0.1f;  // ~0.1mA in deep sleep mode
+            return 0.01f;   // ~10uA in deep sleep
         default:
             return 0.0f;
     }
 }
 
-} // namespace LightSensor
+}  // namespace LightSensor

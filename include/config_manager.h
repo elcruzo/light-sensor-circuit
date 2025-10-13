@@ -4,12 +4,16 @@
 #include "power_manager.h"
 #include "data_logger.h"
 #include "signal_processor.h"
-#include <string>
-#include <map>
-#include <memory>
+#include <cstdint>
 #include <functional>
 
 namespace LightSensor {
+
+// Maximum string lengths for config fields
+static const size_t MAX_DEVICE_ID_LEN = 32;
+static const size_t MAX_VERSION_LEN = 16;
+static const size_t MAX_PATH_LEN = 64;
+static const size_t MAX_METHOD_LEN = 32;
 
 /**
  * @brief System configuration structure
@@ -28,63 +32,65 @@ struct SystemConfig {
     SignalConfig signal;
     
     // System settings
-    std::string device_id;            // Unique device identifier
-    std::string firmware_version;     // Firmware version
-    bool enable_debug_mode;           // Enable debug output
-    uint32_t system_timeout_ms;       // System timeout in milliseconds
-    bool enable_watchdog;             // Enable watchdog timer
-    uint32_t watchdog_timeout_ms;     // Watchdog timeout in milliseconds
+    char device_id[MAX_DEVICE_ID_LEN];
+    char firmware_version[MAX_VERSION_LEN];
+    bool enable_debug_mode;
+    uint32_t system_timeout_ms;
+    bool enable_watchdog;
+    uint32_t watchdog_timeout_ms;
 };
 
 /**
  * @brief Calibration data
  */
 struct CalibrationData {
-    float dark_reference;             // Dark current reference value
-    float light_reference;            // Light reference value (lux)
-    float sensitivity;                // Calculated sensitivity
-    float offset;                     // Calculated offset
-    uint32_t calibration_timestamp;   // When calibration was performed
-    bool is_valid;                    // Calibration validity flag
-    std::string calibration_method;   // Method used for calibration
+    float dark_reference;
+    float light_reference;
+    float sensitivity;
+    float offset;
+    uint32_t calibration_timestamp;
+    bool is_valid;
+    char calibration_method[MAX_METHOD_LEN];
 };
 
 /**
  * @brief Configuration validation result
  */
 struct ConfigValidation {
-    bool is_valid;                    // Overall validation result
-    std::vector<std::string> errors; // List of validation errors
-    std::vector<std::string> warnings; // List of validation warnings
+    bool is_valid;
+    uint8_t error_count;
+    uint8_t warning_count;
+    char last_error[64];
+    char last_warning[64];
 };
 
 /**
  * @brief Configuration change callback
  */
-using ConfigChangeCallback = std::function<void(const std::string&, const std::string&)>;
+using ConfigChangeCallback = std::function<void(const char*, const char*)>;
 
 /**
- * @brief Configuration manager class
+ * @brief ESP32 Configuration manager with SPIFFS and ArduinoJson
  */
 class ConfigManager {
 public:
-    explicit ConfigManager(const std::string& config_file_path = "config.json");
+    explicit ConfigManager(const char* config_file_path = "/config.json");
     ~ConfigManager() = default;
     
     /**
-     * @brief Initialize configuration manager
+     * @brief Initialize configuration manager and SPIFFS
      * @return true if initialization successful
      */
     bool initialize();
     
     /**
-     * @brief Load configuration from file
+     * @brief Load configuration from SPIFFS
      * @return true if load successful
      */
     bool loadConfig();
     
     /**
-     * @brief Save configuration to file
+     * @brief Save configuration to SPIFFS
      * @return true if save successful
      */
     bool saveConfig();
@@ -144,34 +150,6 @@ public:
     void setConfigChangeCallback(ConfigChangeCallback callback);
     
     /**
-     * @brief Get configuration value by key
-     * @param key Configuration key
-     * @return Configuration value (empty if not found)
-     */
-    std::string getConfigValue(const std::string& key) const;
-    
-    /**
-     * @brief Set configuration value by key
-     * @param key Configuration key
-     * @param value Configuration value
-     * @return true if set successful
-     */
-    bool setConfigValue(const std::string& key, const std::string& value);
-    
-    /**
-     * @brief Export configuration to JSON
-     * @return JSON string representation
-     */
-    std::string exportToJson() const;
-    
-    /**
-     * @brief Import configuration from JSON
-     * @param json JSON string representation
-     * @return true if import successful
-     */
-    bool importFromJson(const std::string& json);
-    
-    /**
      * @brief Get default configuration
      * @return Default system configuration
      */
@@ -183,59 +161,32 @@ public:
      */
     static CalibrationData getDefaultCalibrationData();
     
+    /**
+     * @brief Check if SPIFFS is available
+     * @return true if SPIFFS is mounted
+     */
+    bool isStorageAvailable() const;
+    
 private:
-    std::string config_file_path_;
+    char config_file_path_[MAX_PATH_LEN];
+    char calibration_file_path_[MAX_PATH_LEN];
     SystemConfig config_;
     CalibrationData calibration_data_;
     ConfigChangeCallback config_change_callback_;
+    bool spiffs_initialized_;
     
-    /**
-     * @brief Parse JSON configuration
-     * @param json JSON string
-     * @return true if parse successful
-     */
-    bool parseJsonConfig(const std::string& json);
+    bool initializeSPIFFS();
+    bool parseJsonConfig(const char* json);
+    bool generateJsonConfig(char* buffer, size_t buffer_size) const;
+    bool loadCalibration();
+    bool saveCalibration();
     
-    /**
-     * @brief Generate JSON configuration
-     * @return JSON string
-     */
-    std::string generateJsonConfig() const;
-    
-    /**
-     * @brief Validate sensor configuration
-     * @param sensor_config Sensor configuration to validate
-     * @return Validation result
-     */
     ConfigValidation validateSensorConfig(const SensorConfig& sensor_config) const;
-    
-    /**
-     * @brief Validate power configuration
-     * @param power_config Power configuration to validate
-     * @return Validation result
-     */
     ConfigValidation validatePowerConfig(const PowerConfig& power_config) const;
-    
-    /**
-     * @brief Validate logger configuration
-     * @param logger_config Logger configuration to validate
-     * @return Validation result
-     */
     ConfigValidation validateLoggerConfig(const LoggerConfig& logger_config) const;
-    
-    /**
-     * @brief Validate signal configuration
-     * @param signal_config Signal configuration to validate
-     * @return Validation result
-     */
     ConfigValidation validateSignalConfig(const SignalConfig& signal_config) const;
     
-    /**
-     * @brief Notify configuration change
-     * @param key Changed configuration key
-     * @param value New configuration value
-     */
-    void notifyConfigChange(const std::string& key, const std::string& value);
+    void notifyConfigChange(const char* key, const char* value);
 };
 
 /**
@@ -243,42 +194,11 @@ private:
  */
 class ConfigPresets {
 public:
-    /**
-     * @brief Get low power preset
-     * @return Low power configuration
-     */
     static SystemConfig getLowPowerPreset();
-    
-    /**
-     * @brief Get high accuracy preset
-     * @return High accuracy configuration
-     */
     static SystemConfig getHighAccuracyPreset();
-    
-    /**
-     * @brief Get balanced preset
-     * @return Balanced configuration
-     */
     static SystemConfig getBalancedPreset();
-    
-    /**
-     * @brief Get development preset
-     * @return Development configuration
-     */
     static SystemConfig getDevelopmentPreset();
-    
-    /**
-     * @brief Get preset by name
-     * @param preset_name Name of preset
-     * @return Configuration preset (empty if not found)
-     */
-    static SystemConfig getPreset(const std::string& preset_name);
-    
-    /**
-     * @brief Get available preset names
-     * @return Vector of preset names
-     */
-    static std::vector<std::string> getAvailablePresets();
+    static SystemConfig getPreset(const char* preset_name);
 };
 
-} // namespace LightSensor
+}  // namespace LightSensor

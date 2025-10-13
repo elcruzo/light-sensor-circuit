@@ -1,0 +1,9 @@
+{
+  "dark_reference": 0.0,
+  "light_reference": 1000.0,
+  "sensitivity": 1.0,
+  "offset": 0.0,
+  "calibration_timestamp": 0,
+  "is_valid": false,
+  "calibration_method": "None"
+}

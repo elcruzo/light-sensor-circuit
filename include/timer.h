@@ -1,12 +1,11 @@
 #pragma once
 
 #include <cstdint>
-#include <chrono>
 
 namespace LightSensor {
 
 /**
- * @brief Simple timer utility class
+ * @brief Simple timer utility class for ESP32
  */
 class Timer {
 public:
@@ -19,7 +18,8 @@ public:
     bool hasElapsed(uint32_t timeout_ms) const;
     
 private:
-    std::chrono::steady_clock::time_point start_time_;
+    uint32_t start_time_ms_;
+    uint32_t start_time_us_;
 };
 
-} // namespace LightSensor
+}  // namespace LightSensor

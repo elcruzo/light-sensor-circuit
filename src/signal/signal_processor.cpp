@@ -1,43 +1,55 @@
 #include "signal_processor.h"
-#include <algorithm>
-#include <numeric>
+#include <Arduino.h>
 #include <cmath>
-#include <vector>
-#include <deque>
+#include <algorithm>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 namespace LightSensor {
 
 // MovingAverageFilter Implementation
 MovingAverageFilter::MovingAverageFilter(uint8_t window_size)
-    : window_size_(window_size), sum_(0.0f) {
-    // deque doesn't have reserve, but we can pre-allocate if needed
+    : window_size_(window_size < MAX_FILTER_WINDOW ? window_size : MAX_FILTER_WINDOW),
+      buffer_index_(0), buffer_count_(0), sum_(0.0f) {
+    for (size_t i = 0; i < MAX_FILTER_WINDOW; ++i) {
+        buffer_[i] = 0.0f;
+    }
 }
 
 float MovingAverageFilter::process(float input) {
-    buffer_.push_back(input);
-    sum_ += input;
-    
-    if (buffer_.size() > window_size_) {
-        sum_ -= buffer_.front();
-        buffer_.pop_front();
+    // Remove old value from sum if buffer is full
+    if (buffer_count_ >= window_size_) {
+        sum_ -= buffer_[buffer_index_];
     }
     
-    return sum_ / buffer_.size();
+    // Add new value
+    buffer_[buffer_index_] = input;
+    sum_ += input;
+    
+    buffer_index_ = (buffer_index_ + 1) % window_size_;
+    if (buffer_count_ < window_size_) {
+        buffer_count_++;
+    }
+    
+    return sum_ / buffer_count_;
 }
 
 void MovingAverageFilter::reset() {
-    buffer_.clear();
+    for (size_t i = 0; i < MAX_FILTER_WINDOW; ++i) {
+        buffer_[i] = 0.0f;
+    }
+    buffer_index_ = 0;
+    buffer_count_ = 0;
     sum_ = 0.0f;
 }
 
 // LowPassFilter Implementation
 LowPassFilter::LowPassFilter(float cutoff_freq, float sample_rate)
-    : cutoff_freq_(cutoff_freq), sample_rate_(sample_rate), 
-      prev_output_(0.0f) {
-    
-    // Calculate alpha for first-order low-pass filter
-    float rc = 1.0f / (2.0f * M_PI * cutoff_freq_);
-    float dt = 1.0f / sample_rate_;
+    : prev_output_(0.0f) {
+    float rc = 1.0f / (2.0f * M_PI * cutoff_freq);
+    float dt = 1.0f / sample_rate;
     alpha_ = dt / (rc + dt);
 }
 
@@ -52,37 +64,55 @@ void LowPassFilter::reset() {
 
 // MedianFilter Implementation
 MedianFilter::MedianFilter(uint8_t window_size)
-    : window_size_(window_size) {
-    // deque doesn't have reserve, but we can pre-allocate if needed
-    sorted_buffer_.reserve(window_size_);
+    : window_size_(window_size < MAX_FILTER_WINDOW ? window_size : MAX_FILTER_WINDOW),
+      buffer_index_(0), buffer_count_(0) {
+    for (size_t i = 0; i < MAX_FILTER_WINDOW; ++i) {
+        buffer_[i] = 0.0f;
+        sorted_buffer_[i] = 0.0f;
+    }
 }
 
 float MedianFilter::process(float input) {
-    buffer_.push_back(input);
-    
-    if (buffer_.size() > window_size_) {
-        buffer_.pop_front();
+    buffer_[buffer_index_] = input;
+    buffer_index_ = (buffer_index_ + 1) % window_size_;
+    if (buffer_count_ < window_size_) {
+        buffer_count_++;
     }
     
-    if (buffer_.size() < 3) {
-        return input; // Not enough data for median
+    if (buffer_count_ < 3) {
+        return input;
     }
     
-    // Copy to sorted buffer and sort
-    sorted_buffer_.assign(buffer_.begin(), buffer_.end());
-    std::sort(sorted_buffer_.begin(), sorted_buffer_.end());
+    // Copy to sorted buffer
+    for (size_t i = 0; i < buffer_count_; ++i) {
+        sorted_buffer_[i] = buffer_[i];
+    }
     
-    size_t size = sorted_buffer_.size();
-    if (size % 2 == 0) {
-        return (sorted_buffer_[size / 2 - 1] + sorted_buffer_[size / 2]) / 2.0f;
+    // Simple bubble sort (efficient for small arrays)
+    for (size_t i = 0; i < buffer_count_ - 1; ++i) {
+        for (size_t j = 0; j < buffer_count_ - i - 1; ++j) {
+            if (sorted_buffer_[j] > sorted_buffer_[j + 1]) {
+                float temp = sorted_buffer_[j];
+                sorted_buffer_[j] = sorted_buffer_[j + 1];
+                sorted_buffer_[j + 1] = temp;
+            }
+        }
+    }
+    
+    if (buffer_count_ % 2 == 0) {
+        return (sorted_buffer_[buffer_count_ / 2 - 1] + sorted_buffer_[buffer_count_ / 2]) / 2.0f;
     } else {
-        return sorted_buffer_[size / 2];
+        return sorted_buffer_[buffer_count_ / 2];
     }
 }
 
 void MedianFilter::reset() {
-    buffer_.clear();
-    sorted_buffer_.clear();
+    for (size_t i = 0; i < MAX_FILTER_WINDOW; ++i) {
+        buffer_[i] = 0.0f;
+        sorted_buffer_[i] = 0.0f;
+    }
+    buffer_index_ = 0;
+    buffer_count_ = 0;
 }
 
 // AdaptiveFilter Implementation
@@ -96,7 +126,6 @@ float AdaptiveFilter::process(float input) {
     error_variance_ = (1.0f - adaptation_rate_) * error_variance_ + 
                      adaptation_rate_ * error * error;
     
-    // Adapt filter coefficient based on signal characteristics
     if (error_variance_ > noise_floor_) {
         filter_coefficient_ = std::min(0.9f, filter_coefficient_ + adaptation_rate_ * 0.1f);
     } else {
@@ -118,177 +147,106 @@ void AdaptiveFilter::updateParameters(float adaptation_rate, float noise_floor) 
     noise_floor_ = noise_floor;
 }
 
-// OutlierDetector Implementation
-OutlierDetector::OutlierDetector(float threshold)
-    : threshold_(threshold) {
-}
-
-bool OutlierDetector::isOutlier(float value, const std::vector<float>& recent_values) {
-    if (recent_values.size() < 3) {
-        return false; // Not enough data for outlier detection
-    }
-    
-    float mean = calculateMean(recent_values);
-    float std_dev = calculateStdDev(recent_values, mean);
-    
-    if (std_dev == 0.0f) {
-        return false; // No variation in data
-    }
-    
-    float z_score = std::abs(value - mean) / std_dev;
-    return z_score > threshold_;
-}
-
-void OutlierDetector::setThreshold(float threshold) {
-    threshold_ = threshold;
-}
-
-float OutlierDetector::calculateMean(const std::vector<float>& values) const {
-    if (values.empty()) {
-        return 0.0f;
-    }
-    
-    float sum = std::accumulate(values.begin(), values.end(), 0.0f);
-    return sum / values.size();
-}
-
-float OutlierDetector::calculateStdDev(const std::vector<float>& values, float mean) const {
-    if (values.size() < 2) {
-        return 0.0f;
-    }
-    
-    float sum_squared_diff = 0.0f;
-    for (float value : values) {
-        float diff = value - mean;
-        sum_squared_diff += diff * diff;
-    }
-    
-    return std::sqrt(sum_squared_diff / (values.size() - 1));
-}
-
-// PeakDetector Implementation
-PeakDetector::PeakDetector(float threshold)
-    : threshold_(threshold), prev_value_(0.0f), rising_(false) {
-}
-
-bool PeakDetector::isPeak(float value, const std::vector<float>& recent_values) {
-    if (recent_values.size() < 3) {
-        return false; // Not enough data for peak detection
-    }
-    
-    bool current_rising = value > prev_value_;
-    
-    // Detect peak: was rising, now falling
-    bool is_peak = rising_ && !current_rising;
-    
-    // Check if the change is significant enough
-    if (is_peak) {
-        float change = std::abs(value - prev_value_);
-        float avg_value = std::accumulate(recent_values.begin(), recent_values.end(), 0.0f) / recent_values.size();
-        is_peak = change > (avg_value * threshold_);
-    }
-    
-    rising_ = current_rising;
-    prev_value_ = value;
-    
-    return is_peak;
-}
-
-void PeakDetector::setThreshold(float threshold) {
-    threshold_ = threshold;
-}
-
 // TrendAnalyzer Implementation
 TrendAnalyzer::TrendAnalyzer(uint8_t window_size)
-    : window_size_(window_size) {
-    // deque doesn't have reserve, but we can pre-allocate if needed
+    : window_size_(window_size < MAX_FILTER_WINDOW ? window_size : MAX_FILTER_WINDOW),
+      buffer_index_(0), buffer_count_(0) {
+    for (size_t i = 0; i < MAX_FILTER_WINDOW; ++i) {
+        buffer_[i] = 0.0f;
+    }
 }
 
-TrendAnalyzer::TrendResult TrendAnalyzer::analyzeTrend(float value) {
-    buffer_.push_back(value);
-    
-    if (buffer_.size() > window_size_) {
-        buffer_.pop_front();
+TrendResult TrendAnalyzer::analyzeTrend(float value) {
+    buffer_[buffer_index_] = value;
+    buffer_index_ = (buffer_index_ + 1) % window_size_;
+    if (buffer_count_ < window_size_) {
+        buffer_count_++;
     }
     
     TrendResult result = {0.0f, 0.0f, false, false};
     
-    if (buffer_.size() < 3) {
-        return result; // Not enough data for trend analysis
+    if (buffer_count_ < 3) {
+        return result;
     }
-    
-    // Prepare data for linear regression
-    std::vector<float> x_values, y_values;
-    for (size_t i = 0; i < buffer_.size(); ++i) {
-        x_values.push_back(static_cast<float>(i));
-        y_values.push_back(buffer_[i]);
-    }
-    
-    auto [slope, correlation] = linearRegression(x_values, y_values);
-    
-    result.slope = slope;
-    result.confidence = std::abs(correlation);
-    result.is_increasing = slope > 0.0f;
-    result.is_decreasing = slope < 0.0f;
-    
-    return result;
-}
-
-void TrendAnalyzer::setWindowSize(uint8_t window_size) {
-    window_size_ = window_size;
-    buffer_.clear();
-}
-
-std::pair<float, float> TrendAnalyzer::linearRegression(const std::vector<float>& x_values, 
-                                                       const std::vector<float>& y_values) const {
-    if (x_values.size() != y_values.size() || x_values.size() < 2) {
-        return {0.0f, 0.0f};
-    }
-    
-    size_t n = x_values.size();
     
     // Calculate means
-    float x_mean = std::accumulate(x_values.begin(), x_values.end(), 0.0f) / n;
-    float y_mean = std::accumulate(y_values.begin(), y_values.end(), 0.0f) / n;
+    float x_mean = (buffer_count_ - 1) / 2.0f;
+    float y_mean = 0.0f;
+    for (size_t i = 0; i < buffer_count_; ++i) {
+        y_mean += buffer_[i];
+    }
+    y_mean /= buffer_count_;
     
-    // Calculate slope and correlation
+    // Calculate slope and correlation using linear regression
     float numerator = 0.0f;
     float x_denominator = 0.0f;
     float y_denominator = 0.0f;
     
-    for (size_t i = 0; i < n; ++i) {
-        float x_diff = x_values[i] - x_mean;
-        float y_diff = y_values[i] - y_mean;
+    for (size_t i = 0; i < buffer_count_; ++i) {
+        float x_diff = static_cast<float>(i) - x_mean;
+        float y_diff = buffer_[(buffer_index_ + i) % window_size_] - y_mean;
         
         numerator += x_diff * y_diff;
         x_denominator += x_diff * x_diff;
         y_denominator += y_diff * y_diff;
     }
     
-    float slope = (x_denominator == 0.0f) ? 0.0f : numerator / x_denominator;
-    float correlation = (x_denominator == 0.0f || y_denominator == 0.0f) ? 
-                       0.0f : numerator / std::sqrt(x_denominator * y_denominator);
+    if (x_denominator > 0.001f) {
+        result.slope = numerator / x_denominator;
+        
+        if (y_denominator > 0.001f) {
+            result.confidence = fabsf(numerator / sqrtf(x_denominator * y_denominator));
+        }
+    }
     
-    return {slope, correlation};
+    result.is_increasing = result.slope > 0.0f && result.confidence > 0.5f;
+    result.is_decreasing = result.slope < 0.0f && result.confidence > 0.5f;
+    
+    return result;
+}
+
+void TrendAnalyzer::setWindowSize(uint8_t window_size) {
+    window_size_ = window_size < MAX_FILTER_WINDOW ? window_size : MAX_FILTER_WINDOW;
+    reset();
+}
+
+void TrendAnalyzer::reset() {
+    for (size_t i = 0; i < MAX_FILTER_WINDOW; ++i) {
+        buffer_[i] = 0.0f;
+    }
+    buffer_index_ = 0;
+    buffer_count_ = 0;
 }
 
 // SignalProcessor Implementation
 SignalProcessor::SignalProcessor(const SignalConfig& config)
-    : config_(config), outlier_detector_(config.outlier_threshold),
-      peak_detector_(config.peak_threshold), trend_analyzer_(config.trend_window),
-      noise_level_estimate_(0.0f), signal_quality_(50) {
+    : config_(config),
+      ma_filter_(config.moving_average_window),
+      lp_filter_(config.low_pass_cutoff > 0 ? config.low_pass_cutoff : 0.5f, 1.0f),
+      median_filter_(config.median_window),
+      adaptive_filter_(config.adaptation_rate, config.noise_floor),
+      trend_analyzer_(config.trend_window),
+      ma_enabled_(config.moving_average_window > 1),
+      lp_enabled_(config.low_pass_cutoff > 0),
+      median_enabled_(config.enable_median_filter),
+      adaptive_enabled_(config.enable_adaptive_filter),
+      recent_index_(0), recent_count_(0),
+      noise_level_estimate_(0.0f), signal_quality_(50),
+      prev_value_(0.0f), rising_(false) {
     
-    // recent_values_ is a deque, no reserve needed
-    initializeFilters();
+    for (size_t i = 0; i < MAX_RECENT_VALUES; ++i) {
+        recent_values_[i] = 0.0f;
+    }
 }
 
 SignalAnalysis SignalProcessor::processReading(const SensorReading& reading) {
     SignalAnalysis analysis;
     
-    // Store recent values for analysis
-    recent_values_.push_back(reading.lux_value);
-    if (recent_values_.size() > 20) {
-        recent_values_.pop_front();
+    // Store recent values
+    recent_values_[recent_index_] = reading.lux_value;
+    recent_index_ = (recent_index_ + 1) % MAX_RECENT_VALUES;
+    if (recent_count_ < MAX_RECENT_VALUES) {
+        recent_count_++;
     }
     
     // Apply filters
@@ -298,26 +256,16 @@ SignalAnalysis SignalProcessor::processReading(const SensorReading& reading) {
     updateNoiseEstimate(analysis.filtered_value, reading.lux_value);
     
     // Outlier detection
-    if (config_.enable_outlier_removal) {
-        analysis.is_outlier = outlier_detector_.isOutlier(reading.lux_value, 
-            std::vector<float>(recent_values_.begin(), recent_values_.end()));
-    } else {
-        analysis.is_outlier = false;
-    }
+    analysis.is_outlier = config_.enable_outlier_removal && isOutlier(reading.lux_value);
     
     // Peak detection
-    if (config_.enable_peak_detection) {
-        analysis.is_peak = peak_detector_.isPeak(reading.lux_value, 
-            std::vector<float>(recent_values_.begin(), recent_values_.end()));
-    } else {
-        analysis.is_peak = false;
-    }
+    analysis.is_peak = config_.enable_peak_detection && isPeak(reading.lux_value);
     
     // Trend analysis
     if (config_.enable_trend_detection) {
-        auto trend_result = trend_analyzer_.analyzeTrend(reading.lux_value);
-        analysis.trend_slope = trend_result.slope;
-        analysis.trend_confidence = trend_result.confidence;
+        TrendResult trend = trend_analyzer_.analyzeTrend(reading.lux_value);
+        analysis.trend_slope = trend.slope;
+        analysis.trend_confidence = trend.confidence;
     } else {
         analysis.trend_slope = 0.0f;
         analysis.trend_confidence = 0.0f;
@@ -325,7 +273,7 @@ SignalAnalysis SignalProcessor::processReading(const SensorReading& reading) {
     
     // Calculate signal quality metrics
     analysis.noise_level = noise_level_estimate_;
-    analysis.signal_to_noise_ratio = (analysis.filtered_value > 0.0f) ? 
+    analysis.signal_to_noise_ratio = (analysis.filtered_value > 0.001f) ? 
         analysis.filtered_value / std::max(noise_level_estimate_, 0.001f) : 0.0f;
     
     analysis.quality_score = calculateSignalQuality(analysis);
@@ -336,22 +284,35 @@ SignalAnalysis SignalProcessor::processReading(const SensorReading& reading) {
 
 void SignalProcessor::configure(const SignalConfig& config) {
     config_ = config;
-    outlier_detector_.setThreshold(config.outlier_threshold);
-    peak_detector_.setThreshold(config.peak_threshold);
+    
+    ma_enabled_ = config.moving_average_window > 1;
+    lp_enabled_ = config.low_pass_cutoff > 0;
+    median_enabled_ = config.enable_median_filter;
+    adaptive_enabled_ = config.enable_adaptive_filter;
+    
     trend_analyzer_.setWindowSize(config.trend_window);
+    adaptive_filter_.updateParameters(config.adaptation_rate, config.noise_floor);
     
     reset();
-    initializeFilters();
 }
 
 void SignalProcessor::reset() {
-    for (auto& filter : filters_) {
-        filter->reset();
-    }
+    ma_filter_.reset();
+    lp_filter_.reset();
+    median_filter_.reset();
+    adaptive_filter_.reset();
+    trend_analyzer_.reset();
     
-    recent_values_.clear();
+    for (size_t i = 0; i < MAX_RECENT_VALUES; ++i) {
+        recent_values_[i] = 0.0f;
+    }
+    recent_index_ = 0;
+    recent_count_ = 0;
+    
     noise_level_estimate_ = 0.0f;
     signal_quality_ = 50;
+    prev_value_ = 0.0f;
+    rising_ = false;
 }
 
 uint8_t SignalProcessor::getSignalQuality() const {
@@ -363,66 +324,70 @@ float SignalProcessor::getNoiseLevel() const {
 }
 
 void SignalProcessor::setFilterEnabled(FilterType filter_type, bool enable) {
-    // This would require modifying the filter application logic
-    // For now, we'll implement a simple approach
-    // In a more sophisticated implementation, you'd track which filters are enabled
+    switch (filter_type) {
+        case FilterType::MOVING_AVERAGE:
+            ma_enabled_ = enable;
+            break;
+        case FilterType::LOW_PASS:
+            lp_enabled_ = enable;
+            break;
+        case FilterType::MEDIAN:
+            median_enabled_ = enable;
+            break;
+        case FilterType::ADAPTIVE:
+            adaptive_enabled_ = enable;
+            break;
+        default:
+            break;
+    }
 }
 
 void SignalProcessor::initializeFilters() {
-    filters_.clear();
-    
-    // Add moving average filter
-    if (config_.moving_average_window > 1) {
-        filters_.push_back(std::make_unique<MovingAverageFilter>(config_.moving_average_window));
-    }
-    
-    // Add median filter
-    if (config_.enable_median_filter && config_.median_window > 1) {
-        filters_.push_back(std::make_unique<MedianFilter>(config_.median_window));
-    }
-    
-    // Add low-pass filter
-    if (config_.low_pass_cutoff > 0.0f) {
-        // Assuming 1Hz sample rate for now
-        filters_.push_back(std::make_unique<LowPassFilter>(config_.low_pass_cutoff, 1.0f));
-    }
-    
-    // Add adaptive filter
-    if (config_.enable_adaptive_filter) {
-        filters_.push_back(std::make_unique<AdaptiveFilter>(config_.adaptation_rate, config_.noise_floor));
-    }
+    ma_filter_.reset();
+    lp_filter_.reset();
+    median_filter_.reset();
+    adaptive_filter_.reset();
 }
 
 float SignalProcessor::applyFilters(float input) {
-    float filtered_value = input;
+    float value = input;
     
-    for (auto& filter : filters_) {
-        filtered_value = filter->process(filtered_value);
+    if (ma_enabled_) {
+        value = ma_filter_.process(value);
     }
     
-    return filtered_value;
+    if (median_enabled_) {
+        value = median_filter_.process(value);
+    }
+    
+    if (lp_enabled_) {
+        value = lp_filter_.process(value);
+    }
+    
+    if (adaptive_enabled_) {
+        value = adaptive_filter_.process(value);
+    }
+    
+    return value;
 }
 
 void SignalProcessor::updateNoiseEstimate(float filtered_value, float raw_value) {
-    // Simple noise estimation based on difference between raw and filtered
-    float noise = std::abs(raw_value - filtered_value);
-    
-    // Update noise level estimate using exponential moving average
-    float alpha = 0.1f; // Learning rate
+    float noise = fabsf(raw_value - filtered_value);
+    float alpha = 0.1f;
     noise_level_estimate_ = (1.0f - alpha) * noise_level_estimate_ + alpha * noise;
 }
 
 uint8_t SignalProcessor::calculateSignalQuality(const SignalAnalysis& analysis) const {
-    uint8_t quality = 100;
+    int quality = 100;
     
-    // Reduce quality based on noise level
+    // Reduce quality based on SNR
     if (analysis.signal_to_noise_ratio < 1.0f) {
         quality -= 30;
     } else if (analysis.signal_to_noise_ratio < 2.0f) {
         quality -= 15;
     }
     
-    // Reduce quality if outlier detected
+    // Reduce quality if outlier
     if (analysis.is_outlier) {
         quality -= 20;
     }
@@ -432,8 +397,65 @@ uint8_t SignalProcessor::calculateSignalQuality(const SignalAnalysis& analysis) 
         quality -= 10;
     }
     
-    // Ensure quality is within bounds
-    return std::max(0, std::min(100, static_cast<int>(quality)));
+    return static_cast<uint8_t>(std::max(0, std::min(100, quality)));
 }
 
-} // namespace LightSensor
+bool SignalProcessor::isOutlier(float value) const {
+    if (recent_count_ < 3) {
+        return false;
+    }
+    
+    float mean = calculateMean();
+    float std_dev = calculateStdDev(mean);
+    
+    if (std_dev < 0.001f) {
+        return false;
+    }
+    
+    float z_score = fabsf(value - mean) / std_dev;
+    return z_score > config_.outlier_threshold;
+}
+
+bool SignalProcessor::isPeak(float value) {
+    bool current_rising = value > prev_value_;
+    bool is_peak = rising_ && !current_rising;
+    
+    if (is_peak && recent_count_ > 0) {
+        float avg = calculateMean();
+        float change = fabsf(value - prev_value_);
+        is_peak = change > (avg * config_.peak_threshold);
+    }
+    
+    rising_ = current_rising;
+    prev_value_ = value;
+    
+    return is_peak;
+}
+
+float SignalProcessor::calculateMean() const {
+    if (recent_count_ == 0) {
+        return 0.0f;
+    }
+    
+    float sum = 0.0f;
+    for (size_t i = 0; i < recent_count_; ++i) {
+        sum += recent_values_[i];
+    }
+    return sum / recent_count_;
+}
+
+float SignalProcessor::calculateStdDev(float mean) const {
+    if (recent_count_ < 2) {
+        return 0.0f;
+    }
+    
+    float sum_squared_diff = 0.0f;
+    for (size_t i = 0; i < recent_count_; ++i) {
+        float diff = recent_values_[i] - mean;
+        sum_squared_diff += diff * diff;
+    }
+    
+    return sqrtf(sum_squared_diff / (recent_count_ - 1));
+}
+
+}  // namespace LightSensor

@@ -1,7 +1,7 @@
 #pragma once
 
-#include <string>
-#include <fstream>
+#include <cstdint>
+#include <FS.h>
 
 namespace LightSensor {
 
@@ -20,14 +20,14 @@ enum class LogLevel {
  * @brief Log output destinations
  */
 enum class LogOutput {
-    SERIAL,     // Serial output (Arduino)
-    CONSOLE,    // Console output
-    FILE,       // File output
+    SERIAL,     // Serial output
+    FILE,       // SPIFFS file output
+    BOTH,       // Both serial and file
     NONE        // No output
 };
 
 /**
- * @brief Simple logger class
+ * @brief ESP32 Logger class using Serial and SPIFFS
  */
 class Logger {
 public:
@@ -36,27 +36,32 @@ public:
     void setLevel(LogLevel level);
     void setOutput(LogOutput output);
     
-    void log(LogLevel level, const std::string& message);
-    void debug(const std::string& message);
-    void info(const std::string& message);
-    void warning(const std::string& message);
-    void error(const std::string& message);
-    void critical(const std::string& message);
+    void log(LogLevel level, const char* message);
+    void debug(const char* message);
+    void info(const char* message);
+    void warning(const char* message);
+    void error(const char* message);
+    void critical(const char* message);
     
-    bool setLogFile(const std::string& filename);
+    bool setLogFile(const char* filename);
     void closeLogFile();
     
 private:
-    Logger() : level_(LogLevel::INFO), output_(LogOutput::CONSOLE) {}
+    Logger();
     ~Logger() { closeLogFile(); }
+    
+    // Prevent copying
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
     
     LogLevel level_;
     LogOutput output_;
-    std::ofstream file_stream_;
+    File log_file_;
+    bool file_is_open_;
+    char log_file_path_[64];
     
-    std::string formatMessage(LogLevel level, const std::string& message) const;
-    std::string getTimestamp() const;
-    std::string levelToString(LogLevel level) const;
+    void formatMessage(LogLevel level, const char* message, char* buffer, size_t buffer_size) const;
+    const char* levelToString(LogLevel level) const;
 };
 
-} // namespace LightSensor
+}  // namespace LightSensor

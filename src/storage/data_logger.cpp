@@ -1,43 +1,37 @@
 #include "data_logger.h"
-#include <algorithm>
-#include <chrono>
-#include <iomanip>
-#include <sstream>
-#include <cmath>
-#include <vector>
-#include <queue>
-#include <mutex>
-#include <atomic>
-
-#ifdef ARDUINO
 #include <Arduino.h>
-#include <SD.h>
-#else
-#include <fstream>
-#include <iostream>
-#endif
+#include <SPIFFS.h>
+#include <cmath>
+#include <cstring>
+#include <cstdio>
 
 namespace LightSensor {
 
-// FileDataStorage Implementation
-FileDataStorage::FileDataStorage(const LoggerConfig& config)
+// SPIFFSDataStorage Implementation
+SPIFFSDataStorage::SPIFFSDataStorage(const LoggerConfig& config)
     : config_(config), current_file_size_(0), is_initialized_(false) {
+    memset(current_file_path_, 0, sizeof(current_file_path_));
 }
 
-FileDataStorage::~FileDataStorage() {
+SPIFFSDataStorage::~SPIFFSDataStorage() {
     close();
 }
 
-bool FileDataStorage::initialize() {
+bool SPIFFSDataStorage::initialize() {
     if (is_initialized_) {
         return true;
+    }
+    
+    // Initialize SPIFFS if not already done
+    if (!SPIFFS.begin(true)) {
+        return false;
     }
     
     return createNewLogFile();
 }
 
-bool FileDataStorage::write(const SensorReading& data) {
-    if (!is_initialized_ || !log_file_.is_open()) {
+bool SPIFFSDataStorage::write(const SensorReading& data) {
+    if (!is_initialized_ || !log_file_) {
         return false;
     }
     
@@ -48,104 +42,89 @@ bool FileDataStorage::write(const SensorReading& data) {
         }
     }
     
-    std::string formatted_data = formatReading(data);
-    log_file_ << formatted_data << std::endl;
+    char formatted_data[128];
+    formatReading(data, formatted_data, sizeof(formatted_data));
     
-    if (log_file_.fail()) {
+    size_t bytes_written = log_file_.println(formatted_data);
+    if (bytes_written == 0) {
         return false;
     }
     
-    current_file_size_ += formatted_data.length() + 1; // +1 for newline
+    current_file_size_ += bytes_written;
     return true;
 }
 
-bool FileDataStorage::flush() {
-    if (log_file_.is_open()) {
+bool SPIFFSDataStorage::flush() {
+    if (log_file_) {
         log_file_.flush();
-        return !log_file_.fail();
+        return true;
     }
     return true;
 }
 
-void FileDataStorage::close() {
-    if (log_file_.is_open()) {
+void SPIFFSDataStorage::close() {
+    if (log_file_) {
         log_file_.close();
     }
     is_initialized_ = false;
 }
 
-size_t FileDataStorage::getAvailableSpace() const {
-    // This is a simplified implementation
-    // In a real system, you'd check actual storage space
-    return 1024 * 1024; // 1MB placeholder
+size_t SPIFFSDataStorage::getAvailableSpace() const {
+    return SPIFFS.totalBytes() - SPIFFS.usedBytes();
 }
 
-bool FileDataStorage::createNewLogFile() {
+bool SPIFFSDataStorage::createNewLogFile() {
     // Generate timestamp-based filename
-    auto now = std::chrono::system_clock::now();
-    auto time_t = std::chrono::system_clock::to_time_t(now);
+    uint32_t timestamp = millis();
+    snprintf(current_file_path_, sizeof(current_file_path_), 
+             "%s/sensor_%lu.log", config_.log_file_path, timestamp);
     
-    std::stringstream ss;
-    ss << config_.log_file_path << "/light_sensor_";
-    ss << std::put_time(std::localtime(&time_t), "%Y%m%d_%H%M%S");
-    ss << ".log";
+    // Ensure directory exists (SPIFFS doesn't have directories, so just use the path)
+    log_file_ = SPIFFS.open(current_file_path_, FILE_WRITE);
     
-    current_file_path_ = ss.str();
-    
-    #ifdef ARDUINO
-    // Arduino SD card implementation
-    if (!SD.begin()) {
-        return false;
-    }
-    log_file_ = SD.open(current_file_path_.c_str(), FILE_WRITE);
-    #else
-    // Standard C++ file implementation
-    log_file_.open(current_file_path_, std::ios::out | std::ios::app);
-    #endif
-    
-    if (!log_file_.is_open()) {
+    if (!log_file_) {
         return false;
     }
     
     // Write header
-    log_file_ << "# Light Sensor Data Log" << std::endl;
-    log_file_ << "# Format: timestamp_ms,raw_value,lux_value,voltage,quality" << std::endl;
+    log_file_.println("# Light Sensor Data Log");
+    log_file_.println("# Format: timestamp_ms,raw_value,lux_value,voltage,quality");
     
     is_initialized_ = true;
     current_file_size_ = 0;
     return true;
 }
 
-bool FileDataStorage::needsRotation() const {
+bool SPIFFSDataStorage::needsRotation() const {
     return config_.enable_rotation && 
            current_file_size_ > config_.max_file_size_bytes;
 }
 
-bool FileDataStorage::rotateLogFile() {
+bool SPIFFSDataStorage::rotateLogFile() {
     close();
     return createNewLogFile();
 }
 
-std::string FileDataStorage::formatReading(const SensorReading& reading) const {
-    std::stringstream ss;
-    
+void SPIFFSDataStorage::formatReading(const SensorReading& reading, char* buffer, size_t buffer_size) const {
     if (config_.enable_timestamp) {
-        ss << reading.timestamp_ms << ",";
+        snprintf(buffer, buffer_size, "%lu,%.6f,%.6f,%.6f,%u",
+                 reading.timestamp_ms,
+                 reading.raw_value,
+                 reading.lux_value,
+                 reading.voltage,
+                 reading.quality);
+    } else {
+        snprintf(buffer, buffer_size, "%.6f,%.6f,%.6f,%u",
+                 reading.raw_value,
+                 reading.lux_value,
+                 reading.voltage,
+                 reading.quality);
     }
-    
-    ss << std::fixed << std::setprecision(6);
-    ss << reading.raw_value << ",";
-    ss << reading.lux_value << ",";
-    ss << reading.voltage << ",";
-    ss << static_cast<int>(reading.quality);
-    
-    return ss.str();
 }
 
 // MemoryDataStorage Implementation
 MemoryDataStorage::MemoryDataStorage(const LoggerConfig& config)
-    : config_(config), is_initialized_(false) {
-    data_buffer_.reserve(config_.buffer_size);
+    : config_(config), buffer_head_(0), buffer_count_(0), is_initialized_(false) {
 }
 
 bool MemoryDataStorage::initialize() {
@@ -158,46 +137,61 @@ bool MemoryDataStorage::write(const SensorReading& data) {
         return false;
     }
     
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
+    size_t actual_buffer_size = config_.buffer_size < MAX_BUFFER_SIZE ? 
+                                 config_.buffer_size : MAX_BUFFER_SIZE;
     
-    if (data_buffer_.size() >= config_.buffer_size) {
-        // Buffer full, remove oldest entry
-        data_buffer_.erase(data_buffer_.begin());
+    data_buffer_[buffer_head_] = data;
+    buffer_head_ = (buffer_head_ + 1) % actual_buffer_size;
+    
+    if (buffer_count_ < actual_buffer_size) {
+        buffer_count_++;
     }
     
-    data_buffer_.push_back(data);
     return true;
 }
 
 bool MemoryDataStorage::flush() {
-    // Memory storage doesn't need flushing
-    return true;
+    return true;  // Memory storage doesn't need flushing
 }
 
 void MemoryDataStorage::close() {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
-    data_buffer_.clear();
+    clear();
     is_initialized_ = false;
 }
 
 size_t MemoryDataStorage::getAvailableSpace() const {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
-    return config_.buffer_size - data_buffer_.size();
+    size_t actual_buffer_size = config_.buffer_size < MAX_BUFFER_SIZE ? 
+                                 config_.buffer_size : MAX_BUFFER_SIZE;
+    return actual_buffer_size - buffer_count_;
 }
 
-std::vector<SensorReading> MemoryDataStorage::getData() const {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
-    return data_buffer_;
+size_t MemoryDataStorage::getDataCount() const {
+    return buffer_count_;
+}
+
+bool MemoryDataStorage::getData(size_t index, SensorReading& reading) const {
+    if (index >= buffer_count_) {
+        return false;
+    }
+    
+    size_t actual_buffer_size = config_.buffer_size < MAX_BUFFER_SIZE ? 
+                                 config_.buffer_size : MAX_BUFFER_SIZE;
+    size_t actual_index = (buffer_head_ - buffer_count_ + index + actual_buffer_size) % actual_buffer_size;
+    reading = data_buffer_[actual_index];
+    return true;
 }
 
 void MemoryDataStorage::clear() {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
-    data_buffer_.clear();
+    buffer_head_ = 0;
+    buffer_count_ = 0;
 }
 
 // DataLogger Implementation
 DataLogger::DataLogger(const LoggerConfig& config)
-    : config_(config), is_logging_(false), should_stop_(false) {
+    : config_(config), storage_(nullptr), owns_storage_(false),
+      buffer_head_(0), buffer_tail_(0), buffer_count_(0),
+      is_logging_(false), should_stop_(false),
+      sensor_(nullptr), last_log_time_ms_(0) {
     
     // Initialize statistics
     stats_ = {0, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0};
@@ -206,12 +200,17 @@ DataLogger::DataLogger(const LoggerConfig& config)
 DataLogger::~DataLogger() {
     stopLogging();
     flush();
+    
+    if (owns_storage_ && storage_) {
+        delete storage_;
+    }
 }
 
 bool DataLogger::initialize() {
     if (!storage_) {
-        // Create default file storage
-        storage_ = std::make_unique<FileDataStorage>(config_);
+        // Create default SPIFFS storage
+        storage_ = new SPIFFSDataStorage(config_);
+        owns_storage_ = true;
     }
     
     return storage_->initialize();
@@ -220,18 +219,12 @@ bool DataLogger::initialize() {
 bool DataLogger::logReading(const SensorReading& reading) {
     if (!shouldLogReading(reading)) {
         stats_.filtered_readings++;
-        return true; // Filtered out, but not an error
+        return true;  // Filtered out, but not an error
     }
     
-    {
-        std::lock_guard<std::mutex> lock(buffer_mutex_);
-        
-        if (buffer_.size() >= config_.buffer_size) {
-            stats_.buffer_overflow_count++;
-            return false; // Buffer overflow
-        }
-        
-        buffer_.push(reading);
+    if (!enqueue(reading)) {
+        stats_.buffer_overflow_count++;
+        return false;  // Buffer overflow
     }
     
     updateStats(reading);
@@ -240,24 +233,15 @@ bool DataLogger::logReading(const SensorReading& reading) {
     return true;
 }
 
-void DataLogger::startLogging(std::shared_ptr<ILightSensor> sensor) {
-    if (is_logging_) {
+void DataLogger::startLogging(ILightSensor* sensor) {
+    if (is_logging_ || !sensor) {
         return;
     }
     
     sensor_ = sensor;
     is_logging_ = true;
     should_stop_ = false;
-    last_log_time_ = std::chrono::steady_clock::now();
-    
-    // Set up sensor callback
-    if (sensor_) {
-        sensor_->startSampling([this](const SensorReading& reading) {
-            if (!should_stop_) {
-                logReading(reading);
-            }
-        });
-    }
+    last_log_time_ms_ = millis();
 }
 
 void DataLogger::stopLogging() {
@@ -267,42 +251,30 @@ void DataLogger::stopLogging() {
     
     should_stop_ = true;
     is_logging_ = false;
-    
-    if (sensor_) {
-        sensor_->stopSampling();
-    }
+    sensor_ = nullptr;
     
     flush();
 }
 
 bool DataLogger::flush() {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
-    
     if (!storage_) {
         return false;
     }
     
-    bool success = true;
-    while (!buffer_.empty()) {
-        const SensorReading& reading = buffer_.front();
+    SensorReading reading;
+    while (dequeue(reading)) {
         if (!storage_->write(reading)) {
-            success = false;
-            break;
+            return false;
         }
-        buffer_.pop();
     }
     
-    if (success) {
-        storage_->flush();
-    }
-    
-    return success;
+    storage_->flush();
+    return true;
 }
 
 DataStats DataLogger::getStats() const {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
     DataStats current_stats = stats_;
-    current_stats.current_buffer_size = buffer_.size();
+    current_stats.current_buffer_size = buffer_count_;
     return current_stats;
 }
 
@@ -310,19 +282,26 @@ void DataLogger::configure(const LoggerConfig& config) {
     config_ = config;
     
     // Reinitialize storage if needed
-    if (storage_) {
+    if (storage_ && owns_storage_) {
         storage_->close();
-        storage_ = std::make_unique<FileDataStorage>(config_);
+        delete storage_;
+        storage_ = new SPIFFSDataStorage(config_);
         storage_->initialize();
     }
 }
 
-void DataLogger::setStorage(std::unique_ptr<IDataStorage> storage) {
+void DataLogger::setStorage(IDataStorage* storage) {
     if (is_logging_) {
         stopLogging();
     }
     
-    storage_ = std::move(storage);
+    if (owns_storage_ && storage_) {
+        delete storage_;
+    }
+    
+    storage_ = storage;
+    owns_storage_ = false;
+    
     if (storage_) {
         storage_->initialize();
     }
@@ -330,15 +309,13 @@ void DataLogger::setStorage(std::unique_ptr<IDataStorage> storage) {
 
 void DataLogger::process() {
     if (is_logging_ && sensor_) {
-        // Check if it's time for next reading
-        auto now = std::chrono::steady_clock::now();
-        auto time_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - last_log_time_).count();
+        uint32_t now = millis();
         
-        if (time_since_last >= 1000) { // Log every second
+        // Check if it's time for next reading
+        if (now - last_log_time_ms_ >= 1000) {
             SensorReading reading = sensor_->read();
             logReading(reading);
-            last_log_time_ = now;
+            last_log_time_ms_ = now;
         }
     }
     
@@ -387,57 +364,33 @@ void DataLogger::updateStats(const SensorReading& reading) {
 }
 
 void DataLogger::processBuffer() {
-    std::lock_guard<std::mutex> lock(buffer_mutex_);
-    
-    if (buffer_.size() >= config_.flush_threshold) {
-        if (storage_) {
-            while (!buffer_.empty()) {
-                const SensorReading& reading = buffer_.front();
-                storage_->write(reading);
-                buffer_.pop();
-            }
-            storage_->flush();
-        }
+    if (buffer_count_ >= config_.flush_threshold) {
+        flush();
     }
 }
 
-DataStats DataLogger::calculateStats(const std::vector<SensorReading>& readings) const {
-    DataStats stats = {0, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0};
-    
-    if (readings.empty()) {
-        return stats;
+bool DataLogger::enqueue(const SensorReading& reading) {
+    if (buffer_count_ >= MAX_QUEUE_SIZE) {
+        return false;
     }
     
-    stats.total_readings = readings.size();
+    buffer_[buffer_tail_] = reading;
+    buffer_tail_ = (buffer_tail_ + 1) % MAX_QUEUE_SIZE;
+    buffer_count_++;
     
-    float sum = 0.0f;
-    float sum_squared = 0.0f;
-    
-    for (const auto& reading : readings) {
-        if (reading.is_valid) {
-            stats.valid_readings++;
-            sum += reading.lux_value;
-            sum_squared += reading.lux_value * reading.lux_value;
-            
-            if (stats.min_lux == 0.0f || reading.lux_value < stats.min_lux) {
-                stats.min_lux = reading.lux_value;
-            }
-            
-            if (reading.lux_value > stats.max_lux) {
-                stats.max_lux = reading.lux_value;
-            }
-        }
-    }
-    
-    if (stats.valid_readings > 0) {
-        stats.average_lux = sum / stats.valid_readings;
-        
-        // Calculate standard deviation
-        float variance = (sum_squared / stats.valid_readings) - (stats.average_lux * stats.average_lux);
-        stats.std_deviation = std::sqrt(std::max(0.0f, variance));
-    }
-    
-    return stats;
+    return true;
 }
 
-} // namespace LightSensor
+bool DataLogger::dequeue(SensorReading& reading) {
+    if (buffer_count_ == 0) {
+        return false;
+    }
+    
+    reading = buffer_[buffer_head_];
+    buffer_head_ = (buffer_head_ + 1) % MAX_QUEUE_SIZE;
+    buffer_count_--;
+    
+    return true;
+}
+
+}  // namespace LightSensor
